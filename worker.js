@@ -1,16 +1,18 @@
 /**
- * px-proxy — 시세 CSV 중계용 Cloudflare Worker
+ * px-proxy — 시세 데이터 중계용 Cloudflare Worker
  *
- * 하는 일: 브라우저가 CORS 때문에 직접 못 부르는 Stooq / FRED CSV를
- *          대신 받아와 CORS 헤더를 붙여 돌려준다. 그게 전부.
+ * 하는 일: 브라우저가 CORS 때문에 직접 못 부르는 Yahoo Finance(JSON) /
+ *          FRED(CSV) 를 대신 받아와 CORS 헤더를 붙여 돌려준다. 그게 전부.
  *
- * 배포:  Cloudflare 대시보드 → Workers & Pages → Create → Worker
- *        이름: px-proxy  →  이 파일 내용을 통째로 붙여넣고 Deploy
+ * 허용 도메인: Yahoo Finance, FRED, Stooq
+ *
+ * 배포:  Cloudflare 대시보드 → Workers & Pages → px-proxy → Edit code
+ *        → 이 파일 내용을 통째로 붙여넣고 Deploy
  *
  * 확인:  https://px-proxy.<계정>.workers.dev/health   → ok 가 뜨면 성공
  */
 
-const ALLOW = ["stooq.com", "fred.stlouisfed.org"];
+const ALLOW = ["stooq.com", "fred.stlouisfed.org", "query1.finance.yahoo.com", "query2.finance.yahoo.com"];
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -56,19 +58,24 @@ export default {
       const upstream = await fetch(target, {
         cf: { cacheTtl: 300, cacheEverything: true },
         headers: {
-          // Stooq 는 기본 UA 를 종종 거절한다
+          // Stooq·Yahoo 는 기본 UA 를 종종 거절한다
           "User-Agent": "Mozilla/5.0 (compatible; px-proxy/1.0)",
-          "Accept": "text/csv,text/plain,*/*"
+          "Accept": "application/json,text/csv,text/plain,*/*"
         }
       });
 
       const body = await upstream.text();
 
+      const upType = upstream.headers.get("Content-Type") || "text/plain; charset=utf-8";
+      const outType = upType.includes("json")
+        ? "application/json; charset=utf-8"
+        : "text/csv; charset=utf-8";
+
       return new Response(body, {
         status: upstream.status,
         headers: {
           ...CORS,
-          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Type": outType,
           "Cache-Control": "public, max-age=300",
           "X-Upstream-Status": String(upstream.status)
         }

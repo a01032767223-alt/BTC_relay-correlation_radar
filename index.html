@@ -255,7 +255,7 @@ footer{margin-top:30px;padding-top:14px;border-top:1px solid var(--line);font-si
 </details>
 
 <footer>
-  가격·지수 Stooq · 코인 Binance · 심리 Alternative.me · 통화량 FRED · 도미넌스 CoinGecko<br>
+  가격·지수 Yahoo Finance · 코인 Binance · 심리 Alternative.me · 통화량 FRED · 도미넌스 CoinGecko<br>
   상관계수는 일간 로그수익률 기준 피어슨 계수이며, 거래일이 겹치는 날짜만 사용합니다. 투자 판단의 참고 자료입니다.
 </footer>
 
@@ -289,13 +289,13 @@ let period = localStorage.getItem("btccorr.period") || "3M";
 const ASSETS = [
   { id:"BTC",   name:"비트코인",   short:"BTC",    color:"#F0A020", src:"binance", sym:"BTCUSDT", fmt:v=>"$"+fmt(v,0), base:true },
   { id:"ETH",   name:"이더리움",   short:"ETH",    color:"#8A7CF0", src:"binance", sym:"ETHUSDT", fmt:v=>"$"+fmt(v,0) },
-  { id:"NDX",   name:"나스닥100",  short:"NDX",    color:"#4FC1E9", src:"stooq",   sym:"^ndx",    fmt:v=>fmt(v,0) },
-  { id:"SPX",   name:"S&P 500",   short:"SPX",    color:"#7ED9A6", src:"stooq",   sym:"^spx",    fmt:v=>fmt(v,0) },
-  { id:"KOSPI", name:"코스피",     short:"KOSPI",  color:"#E8DCC0", src:"stooq",   sym:"^kospi",  fmt:v=>fmt(v,0) },
-  { id:"GOLD",  name:"금",         short:"GOLD",   color:"#C9A227", src:"stooq",   sym:"xauusd",  fmt:v=>"$"+fmt(v,0) },
-  { id:"DXY",   name:"달러인덱스", short:"DXY",    color:"#5CA46B", src:"stooq",   sym:"dx.f",    fmt:v=>fmt(v,2), inv:true },
-  { id:"US10Y", name:"미10년물",   short:"US10Y",  color:"#D98A1F", src:"stooq",   sym:"10usy.b", fmt:v=>fmt(v,2)+"%", inv:true },
-  { id:"VIX",   name:"VIX",        short:"VIX",    color:"#C36BD6", src:"stooq",   sym:"^vix",    fmt:v=>fmt(v,1), inv:true },
+  { id:"NDX",   name:"나스닥100",  short:"NDX",    color:"#4FC1E9", src:"yahoo",   sym:"%5ENDX",   fmt:v=>fmt(v,0) },
+  { id:"SPX",   name:"S&P 500",   short:"SPX",    color:"#7ED9A6", src:"yahoo",   sym:"%5EGSPC",  fmt:v=>fmt(v,0) },
+  { id:"KOSPI", name:"코스피",     short:"KOSPI",  color:"#E8DCC0", src:"yahoo",   sym:"%5EKS11",  fmt:v=>fmt(v,0) },
+  { id:"GOLD",  name:"금",         short:"GOLD",   color:"#C9A227", src:"yahoo",   sym:"GC%3DF",   fmt:v=>"$"+fmt(v,0) },
+  { id:"DXY",   name:"달러인덱스", short:"DXY",    color:"#5CA46B", src:"yahoo",   sym:"DX-Y.NYB", fmt:v=>fmt(v,2), inv:true },
+  { id:"US10Y", name:"미10년물",   short:"US10Y",  color:"#D98A1F", src:"yahoo",   sym:"%5ETNX",   fmt:v=>fmt(v,2)+"%", inv:true },
+  { id:"VIX",   name:"VIX",        short:"VIX",    color:"#C36BD6", src:"yahoo",   sym:"%5EVIX",   fmt:v=>fmt(v,1), inv:true },
   { id:"M2",    name:"미국 M2",    short:"M2",     color:"#6F8FB0", src:"fred",    sym:"M2SL",    fmt:v=>fmt(v/1000,2)+"조$", slow:true }
 ];
 const CORR_IDS = ["ETH","NDX","SPX","KOSPI","GOLD","DXY","US10Y","VIX","M2"];
@@ -357,19 +357,27 @@ async function loadBinance(a){
   const j = await jget(`https://api.binance.com/api/v3/klines?symbol=${a.sym}&interval=1d&limit=760`);
   return j.map(k=>({ d:new Date(k[0]).toISOString().slice(0,10), c:+k[4] }));
 }
-async function loadStooq(a){
-  const txt = await viaProxy(`https://stooq.com/q/d/l/?s=${encodeURIComponent(a.sym)}&i=d`);
-  const rows = txt.trim().split(/\r?\n/);
-  const head = rows[0].toLowerCase().split(",");
-  const di = head.indexOf("date"), ci = head.indexOf("close");
-  if(di<0||ci<0) throw new Error("형식 불일치");
+async function loadYahoo(a){
+  const y = `https://query1.finance.yahoo.com/v8/finance/chart/${a.sym}?range=2y&interval=1d`;
+  const txt = await viaProxy(y);
+  let j;
+  try{ j = JSON.parse(txt); }catch(e){ throw new Error("JSON 파싱 실패"); }
+  const res = j.chart && j.chart.result && j.chart.result[0];
+  if(!res) throw new Error(j.chart && j.chart.error ? String(j.chart.error.description||"차트 오류") : "결과 없음");
+  const ts = res.timestamp || [];
+  const q = res.indicators && res.indicators.quote && res.indicators.quote[0];
+  const closes = (q && q.close) || [];
+  const adj = res.indicators && res.indicators.adjclose && res.indicators.adjclose[0] && res.indicators.adjclose[0].adjclose;
+  const src = adj || closes;
   const out=[];
-  for(let i=1;i<rows.length;i++){
-    const p=rows[i].split(","); const c=parseFloat(p[ci]);
-    if(p[di] && isFinite(c)) out.push({d:p[di],c});
+  for(let i=0;i<ts.length;i++){
+    const c = src[i];
+    if(ts[i] && c!=null && isFinite(c)){
+      out.push({ d:new Date(ts[i]*1000).toISOString().slice(0,10), c:+c });
+    }
   }
   if(out.length<20) throw new Error("데이터 부족");
-  return out.slice(-800);
+  return out;
 }
 async function loadFred(a){
   const txt = await viaProxy(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${a.sym}`);
@@ -385,7 +393,7 @@ async function loadFred(a){
 async function loadOne(a){
   try{
     D[a.id] = a.src==="binance" ? await loadBinance(a)
-            : a.src==="stooq"   ? await loadStooq(a)
+            : a.src==="yahoo"   ? await loadYahoo(a)
             : await loadFred(a);
   }catch(e){ FAIL[a.id]=String(e.message||e); }
 }
@@ -783,7 +791,7 @@ document.getElementById("clear").onclick=()=>{
 };
 document.getElementById("test").onclick=async()=>{
   const box=document.getElementById("probe");
-  const target="https://stooq.com/q/d/l/?s=%5Espx&i=d";
+  const target="https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=5d&interval=1d";
   box.innerHTML=`<div class="probe-row"><span class="spin"></span>경로별 시험 중…</div>`;
   const rows=[];
   for(const {n,u} of proxyChain(target)){
@@ -792,9 +800,11 @@ document.getElementById("test").onclick=async()=>{
     try{
       const txt=await tget(u,10000);
       const ms=Math.round(performance.now()-t0);
-      if(txt && txt.length>40 && !/^\s*</.test(txt)){
-        mark=`<span class="good">통과</span>`; why=`${ms}ms · ${txt.trim().split(/\r?\n/).length}행`;
-      }else{ mark=`<span class="bad">형식 이상</span>`; why=`${ms}ms · ${txt.slice(0,30).replace(/\s+/g," ")}`; }
+      let ok=false;
+      try{ const j=JSON.parse(txt); ok = j.chart && j.chart.result; }catch(_){}
+      if(ok){
+        mark=`<span class="good">통과</span>`; why=`${ms}ms · JSON 정상`;
+      }else{ mark=`<span class="bad">형식 이상</span>`; why=`${ms}ms · ${txt.slice(0,28).replace(/\s+/g," ")}`; }
     }catch(e){
       mark=`<span class="bad">실패</span>`; why=String(e.message||e).slice(0,44);
     }

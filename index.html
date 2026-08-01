@@ -154,6 +154,9 @@ section{margin:26px 0}
   background:var(--slate);border:1px solid var(--line);border-radius:2px;
   font-size:11px;padding:10px;overflow-x:auto;color:var(--mute);margin-top:10px;
 }
+.probe{margin-top:12px}
+.probe-row{font-size:11.5px;color:var(--text);padding:4px 0;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.probe-row .pn{color:var(--brass);min-width:78px}
 .status{font-size:11.5px;color:var(--mute);margin-top:14px;line-height:1.7}
 .status .bad{color:var(--warn)}
 .status .good{color:var(--ok)}
@@ -239,24 +242,15 @@ footer{margin-top:30px;padding-top:14px;border-top:1px solid var(--line);font-si
   <input id="wk" class="mono" placeholder="https://ict-proxy.계정명.workers.dev" spellcheck="false">
   <div class="btns">
     <button id="save">저장하고 다시 불러오기</button>
-    <button id="clear" class="ghost">공개 프록시로 시도</button>
+    <button id="test" class="ghost">연결 테스트</button>
+    <button id="clear" class="ghost">주소 비우기</button>
   </div>
   <p style="font-size:12px;color:var(--mute);margin:14px 0 0">
-    주가·금리·달러·금 데이터는 브라우저에서 직접 못 가져옵니다(CORS). Worker에 아래 중계 코드를 한 번만 추가하면 안정적으로 동작합니다.
+    주가·금리·달러·금은 브라우저가 직접 못 가져옵니다(CORS). 공개 프록시를 순서대로 시도하지만 자주 막히므로,
+    <b style="color:var(--ivory)">px-proxy</b> Worker를 하나 새로 배포하고 그 주소를 위에 넣는 것이 가장 확실합니다.
+    기존 ict-proxy는 건드리지 않습니다.
   </p>
-<pre>// ict-proxy 의 fetch 핸들러 안에 추가
-if (url.pathname === "/px") {
-  const t = url.searchParams.get("u");
-  const ok = ["stooq.com","fred.stlouisfed.org"];
-  if (!t || !ok.some(d =&gt; new URL(t).hostname.endsWith(d)))
-    return new Response("blocked", { status: 403 });
-  const r = await fetch(t, { cf: { cacheTtl: 300 } });
-  return new Response(await r.text(), { headers: {
-    "Content-Type": "text/csv; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "max-age=300"
-  }});
-}</pre>
+  <div class="probe" id="probe"></div>
   <div class="status" id="status"></div>
 </details>
 
@@ -272,12 +266,15 @@ if (url.pathname === "/px") {
 
 /* ══════════ 설정 ══════════ */
 const LS_WK = "btccorr.worker";
-let WORKER = localStorage.getItem(LS_WK) || "https://ict-proxy.a01032767223.workers.dev";
+let WORKER = localStorage.getItem(LS_WK) || "https://px-proxy.a01032767223.workers.dev";
 
 const PUBLIC_PROXIES = [
-  u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
-  u => "https://corsproxy.io/?url=" + encodeURIComponent(u)
+  { n:"codetabs",   f:u=>"https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(u) },
+  { n:"allorigins", f:u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u) },
+  { n:"corsproxy",  f:u=>"https://corsproxy.io/?url="+encodeURIComponent(u) },
+  { n:"isomorphic", f:u=>"https://cors.isomorphic-git.org/"+u }
 ];
+const DIAG = [];   // 경로별 시도 기록
 
 const PERIODS = [
   { key:"1M", label:"1개월", days:30 },
@@ -329,18 +326,28 @@ async function tget(u,ms=14000){
   finally{ clearTimeout(t); }
 }
 /* 프록시 체인: Worker → 공개 프록시 → 직접 */
-async function viaProxy(target){
+function proxyChain(target){
   const chain=[];
-  if(WORKER) chain.push(WORKER.replace(/\/$/,"")+"/px?u="+encodeURIComponent(target));
-  PUBLIC_PROXIES.forEach(f=>chain.push(f(target)));
-  chain.push(target);
+  if(WORKER) chain.push({ n:"worker", u:WORKER.replace(/\/$/,"")+"/px?u="+encodeURIComponent(target) });
+  PUBLIC_PROXIES.forEach(p=>chain.push({ n:p.n, u:p.f(target) }));
+  chain.push({ n:"직접", u:target });
+  return chain;
+}
+async function viaProxy(target){
   let last="";
-  for(const u of chain){
+  for(const {n,u} of proxyChain(target)){
+    const t0=performance.now();
     try{
       const txt=await tget(u);
-      if(txt && txt.length>40 && !/^\s*</.test(txt)) return txt;
-      last="빈 응답";
-    }catch(e){ last=String(e.message||e); }
+      const ms=Math.round(performance.now()-t0);
+      if(txt && txt.length>40 && !/^\s*</.test(txt)){
+        DIAG.push({n,ok:true,ms}); return txt;
+      }
+      last=`${n}: 형식 이상`; DIAG.push({n,ok:false,ms,why:"형식 이상"});
+    }catch(e){
+      const ms=Math.round(performance.now()-t0);
+      last=`${n}: ${e.message||e}`; DIAG.push({n,ok:false,ms,why:String(e.message||e)});
+    }
   }
   throw new Error(last||"모든 경로 실패");
 }
@@ -773,6 +780,28 @@ document.getElementById("save").onclick=()=>{
 };
 document.getElementById("clear").onclick=()=>{
   WORKER=""; localStorage.removeItem(LS_WK); document.getElementById("wk").value=""; run();
+};
+document.getElementById("test").onclick=async()=>{
+  const box=document.getElementById("probe");
+  const target="https://stooq.com/q/d/l/?s=%5Espx&i=d";
+  box.innerHTML=`<div class="probe-row"><span class="spin"></span>경로별 시험 중…</div>`;
+  const rows=[];
+  for(const {n,u} of proxyChain(target)){
+    const t0=performance.now();
+    let mark="", why="";
+    try{
+      const txt=await tget(u,10000);
+      const ms=Math.round(performance.now()-t0);
+      if(txt && txt.length>40 && !/^\s*</.test(txt)){
+        mark=`<span class="good">통과</span>`; why=`${ms}ms · ${txt.trim().split(/\r?\n/).length}행`;
+      }else{ mark=`<span class="bad">형식 이상</span>`; why=`${ms}ms · ${txt.slice(0,30).replace(/\s+/g," ")}`; }
+    }catch(e){
+      mark=`<span class="bad">실패</span>`; why=String(e.message||e).slice(0,44);
+    }
+    rows.push(`<div class="probe-row"><span class="pn mono">${esc(n)}</span>${mark} <span style="color:var(--mute)">${esc(why)}</span></div>`);
+    box.innerHTML=rows.join("")+`<div class="probe-row"><span class="spin"></span>계속…</div>`;
+  }
+  box.innerHTML=rows.join("");
 };
 run();
 </script>
